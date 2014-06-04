@@ -2,8 +2,12 @@ class RubyDB
   class Error < StandardError; end
 
   module TableSettings
-    def field(field)
-      @field = field
+    def id_name(name = nil)
+      name ? @id_name = name : (@id_name || :id)
+    end
+
+    def field(field = nil)
+      field ? @field = field : (@field.merge({@id_name => :integer})
     end
 
     def unique(keys)
@@ -13,26 +17,63 @@ class RubyDB
     def index(keys)
       @index = keys
     end
+
+    def table_name
+      name.gsub(/\W/, '').sub(/\A([A-Z])/){$1.downcase}.gsub(/([A-Z])/){"_#{$1.downcase}"}
+    end
+  end
+
+  module MiddlewareControl
+    def middleware
+      @middleware ||= begin
+        middleware = Middleware.new table_name
+        middleware.id_name = @id_name || :id
+        middleware.field = @field
+        middleware.index = (@index || []) + (@unique || [])
+      end
+    end
+
+    def select(query)
+      middleware.select query
+    end
+
+    def insert(record)
+      middleware.insert record
+    end
+
+    def update(query, record)
+      middleware.update(query, record)
+    end
+
+    def delete(query)
+      middleware.delete query
+    end
   end
 
   module QueryOperations
     def where(query)
+      inherit query
     end
 
     def find_by(query)
+      klass.find_record @query
     end
 
     def all
+      klass.find_records @query
     end
     alias to_a all
 
     def first
+      all.first
     end
 
     def last
+      all.last
     end
 
     def destroy
+      klass.delete @query
     end
 
     private
@@ -41,7 +82,7 @@ class RubyDB
     end
 
     def merge_query(query)
-      (@query || []) << query
+      @query ? @query.merge(query) : query
     end
 
     def inherit(query)
@@ -49,10 +90,75 @@ class RubyDB
     end
   end
 
+  def initialize(attrs, persisted = false)
+    @persisted = persisted
+    self.class.field.keys.each do |name|
+      instance_variable_set :"@#{name}", attrs[name]
+    end
+  end
+
+  def self.create(attrs)
+    record = new attrs
+    record.save
+    record
+  end
+
+  def self.retrieve(attrs)
+    new attrs, true
+  end
+
+  def self.find_record(query)
+    retrieve select(query).first
+  end
+
+  def self.find_records(query)
+    select(query).map!{|r| retrieve r}
+  end
+
   def save
+    if persisted?
+      self.class.update to_query, to_record
+    else
+      instance_variable_set :"@#{self.class.id_name}", self.class.insert(to_record)
+      @persisted = true
+    end
   end
 
   def destroy
+    self.class.delete to_query
+  end
+
+  def persisted?
+    @persisted
+  end
+
+  private
+  def method_missing(name, *args)
+    if self.class.field.has_key? name
+      instance_variable_get :"@#{name}"
+    elsif name.to_s =~ /\=\z/
+      field_name = name.to_s.sub(/\=\z/, '').to_sym
+      if self.class.field.has_key? field_name
+        instance_variable_set :"@#{field_name}", *args
+      else
+        super
+      end
+    else
+      super
+    end
+  end
+
+  def to_record
+    self.class.field.keys.reduce({}) do |record, field|
+      variable = instance_variable_get :"@#{field}"
+      record[field] = variable unless variable.nil?
+    end
+  end
+
+  def to_query
+    raise unless persisted?
+    id_name = self.class.id_name
+    {id_name => instance_variable_get(:"@#{id_name}")}
   end
 
   extend TableSettings
@@ -91,7 +197,12 @@ class RubyDB
     end
 
     def select(query)
-      if positions = search_index query
+      if query.nil?
+        io = open_content
+        ret = io.read_all.map!{|r| externalize r}
+        io.close
+        ret
+      elsif positions = search_index query
         # not implemented
       else
         q = internalize query
@@ -99,7 +210,7 @@ class RubyDB
         open_content do |io|
           records = io.read_all
         end
-        records.select do |record|
+        records.select! do |record|
           matched = true
           q.each_with_index do |value, i|
             unless value.nil? || QueryLogics.match(value, record[i])
@@ -108,6 +219,9 @@ class RubyDB
             end
           end
           matched
+        end
+        records.map! do |record|
+          externalize record
         end
       end
     end
@@ -122,6 +236,7 @@ class RubyDB
         io.write r
       end
       add_index pos, record
+      record[@id_name]
     end
 
     def update(query, record)
@@ -154,7 +269,11 @@ class RubyDB
     end
 
     def delete(query)
-      if positions = search_index query
+      if query.nil?
+        open_content do |io|
+          io.delete_all
+        end
+      elsif positions = search_index query
         # not implemented
       else
         q = internalize query
@@ -387,6 +506,10 @@ class RubyDB
         @f.truncate i * @record_size
         seek i
         @f.write data
+      end
+
+      def delete_all
+        @f.truncate 0
       end
 
       def close
