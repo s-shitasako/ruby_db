@@ -71,6 +71,197 @@ class RubyDB
   class Middleware
     def initialize(name)
       @table_file = TableFile.new RubyDB::Config.file_root, name
+      @id_name = :id
+    end
+
+    def field=(field)
+      @raw_field = field
+      @field = {@id_name => :integer}.merge field
+    end
+
+    def id_name=(id_name)
+      @id_name = id_name
+      if @field
+        self.field = @raw_field
+      end
+    end
+
+    def index=(index)
+      @index = index
+    end
+
+    def select(query)
+      if positions = search_index query
+        # not implemented
+      else
+        q = internalize query
+        records = nil
+        open_content do |io|
+          records = io.read_all
+        end
+        records.select do |record|
+          matched = true
+          q.each_with_index do |value, i|
+            unless value.nil? || QueryLogics.match(value, record[i])
+              matched = false
+              break
+            end
+          end
+          matched
+        end
+      end
+    end
+
+    def insert(record)
+      record[@id_name] = current_sequence unless record.has_key? @id_name
+      r = internalize record
+      pos = nil
+      open_content do |io|
+        io.seek_last
+        pos = io.tell
+        io.write r
+      end
+      add_index pos, record
+    end
+
+    def update(query, record)
+      if positions = search_index query
+        # not implemented
+      else
+        q = internalize query
+        updated_records = {}
+        open_content do |io|
+          io.read_all.each_with_index do |r, j|
+            matched = true
+            q.each_with_index do |value, i|
+              unless value.nil? || QueryLogics.match(value, r[i])
+                matched = false
+                break
+              end
+            end
+            if matched
+              updated = merge_external r, record
+              io.seek j
+              io.write updated
+              updated_records[j] = updated
+            end
+          end
+        end
+        updated_records.each do |j, updated|
+          edit_index j, updated
+        end
+      end
+    end
+
+    def delete(query)
+      if positions = search_index query
+        # not implemented
+      else
+        q = internalize query
+        deleted_records = {}
+        open_content do |io|
+          io.read_all.each_with_index do |r, j|
+            matched = true
+            q.each_with_index do |value, i|
+              unless value.nil? || QueryLogics.match(value, r[i])
+                matched = false
+                break
+              end
+            end
+            if matched
+              io.delete j
+              deleted_records[j] = r
+            end
+          end
+        end
+        deleted_records.each do |j, deleted|
+          remove_index j, deleted
+        end
+      end
+    end
+
+    def search_index(query)
+      # not implemented
+    end
+
+    def add_index(pos, record)
+      # not implemented
+    end
+
+    def edit_index(pos, record)
+      # not implemented
+    end
+
+    def remove_index(pos, record)
+      # not implemented
+    end
+
+    private
+    def internalize(map_record)
+      db_field.map do |name|
+        map_record[name]
+      end
+    end
+
+    def externalize(arr_record)
+      map_record = {}
+      db_field.each_with_index do |name, i|
+        map_record[name] = arr_record[i]
+      end
+      map_record
+    end
+
+    def merge_external(arr_record, map_record)
+      db_field.each_with_index do |name, i|
+        if map_record.has_key? name
+          arr_record[i] = map_record[name]
+        end
+      end
+    end
+
+    def db_field
+      @db_field ||= db_context.first
+    end
+
+    def db_format
+      @db_format ||= db_context.last
+    end
+
+    def db_context
+      @db_context ||= begin
+        RecordIO.open @table_file.header, @table_file.header_format do |io|
+          db_field =
+          if io.count == 0
+            @field.keys.each do |k|
+              io.write [k.to_s]
+            end
+          else
+            read_all.map! &:to_sym
+          end
+        end
+        db_format = db_field.map{|name| @field[name]}
+        [db_field, db_format]
+      end
+    end
+
+    def open_content(&block)
+      RecordIO.open @table_file.content, db_format, &block
+    end
+
+    def open_index(name, format, &block)
+      RecordIO.open @table_file.index(name), @table_file.index_format(format), &block
+    end
+
+    def current_sequence
+      sequence = 1
+      RecordIO.open @table_file.sequence, @table_file.sequence_format do |io|
+        if io.count > 0
+          sequence = io.read.first + 1
+        end
+        io.seek 0
+        io.write [sequence]
+      end
+      sequence
     end
 
     class TableFile
@@ -87,8 +278,24 @@ class RubyDB
         File.join @root, 'table.tbl'
       end
 
+      def sequence
+        File.join @root, 'table.sqc'
+      end
+
       def index(name)
         File.join @root, "#{name}.idx"
+      end
+
+      def header_format
+        %i(string)
+      end
+
+      def sequence_format
+        %i(integer)
+      end
+
+      def index_format(element)
+        [element, :integer]
       end
     end
 
@@ -119,9 +326,28 @@ class RubyDB
         boolean: lambda{|b| b ? 1 : 0},
       }
 
+      EMPTY_BIN = [].pack ''
+
       def initialize(file, format)
-        @f = file
+        @f = File.open file, 'r+b'
         accept_fotmat format
+      end
+
+      def self.open(file, format)
+        if block_given?
+          begin
+            io = new file, format
+            yield io
+          ensure
+            io.close
+          end
+        else
+          new file, format
+        end
+      end
+
+      def count
+        @f.size / @record_size
       end
 
       def read
@@ -139,16 +365,32 @@ class RubyDB
         @f.write encode record
       end
 
+      def insert(record)
+        pos = @f.tell
+        data = read_rest
+        @f.seek pos
+        write record
+        @f.write data
+      end
+
       def seek(n)
         @f.seek n * @record_size
       end
 
+      def seek_last
+        @f.seek 0, IO::SEEK_END
+      end
+
       def delete(i)
-        records = read_all
-        records.delete_at i
-        @f.truncate 0
-        # @f.seek 0
-        records.each{|r| write r}
+        seek i + 1
+        data = read_rest
+        @f.truncate i * @record_size
+        seek i
+        @f.write data
+      end
+
+      def close
+        @f.close
       end
 
       private
@@ -207,6 +449,12 @@ class RubyDB
         record.pack @pack_format
       end
 
+      def read_rest
+        data = EMPTY_BIN.dup
+        data << @f.read(@record_size) until @f.eof?
+        data
+      end
+
       def self.int2hex(i, size)
         hex = i.to_s 16
         if (l = hex.size) < size
@@ -218,6 +466,14 @@ class RubyDB
         else
           hex
         end
+      end
+    end
+
+    module QueryLogics
+      module_function
+
+      def match(query, value)
+        query == value
       end
     end
   end
