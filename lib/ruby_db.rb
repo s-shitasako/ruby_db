@@ -1,3 +1,11 @@
+#
+# RubyDB
+#
+#   Ruby database library which stores data on the local file system.
+#
+#   https://github.com/s-shitasako/ruby_db
+#
+
 class RubyDB
   class Error < StandardError; end
 
@@ -7,19 +15,21 @@ class RubyDB
     end
 
     def field(field = nil)
-      field ? @field = field : (@field.merge({@id_name => :integer})
+      field ? @field = field : (@field.merge id_name => :integer)
     end
 
-    def unique(keys)
+    def unique(*keys)
       @unique = keys
     end
 
-    def index(keys)
+    def index(*keys)
       @index = keys
     end
 
     def table_name
-      name.gsub(/\W/, '').sub(/\A([A-Z])/){$1.downcase}.gsub(/([A-Z])/){"_#{$1.downcase}"}
+      name.gsub(/\W/, '')
+        .sub(/\A([A-Z])/){$1.downcase}
+        .gsub(/([A-Z])/){"_#{$1.downcase}"}
     end
   end
 
@@ -30,6 +40,7 @@ class RubyDB
         middleware.id_name = @id_name || :id
         middleware.field = @field
         middleware.index = (@index || []) + (@unique || [])
+        middleware
       end
     end
 
@@ -56,7 +67,7 @@ class RubyDB
     end
 
     def find_by(query)
-      klass.find_record @query
+      klass.find_record merge_query query
     end
 
     def all
@@ -90,7 +101,7 @@ class RubyDB
     end
   end
 
-  def initialize(attrs, persisted = false)
+  def initialize(attrs = {}, persisted = false)
     @persisted = persisted
     self.class.field.keys.each do |name|
       instance_variable_set :"@#{name}", attrs[name]
@@ -104,7 +115,7 @@ class RubyDB
   end
 
   def self.retrieve(attrs)
-    new attrs, true
+    attrs && new(attrs, true)
   end
 
   def self.find_record(query)
@@ -119,7 +130,10 @@ class RubyDB
     if persisted?
       self.class.update to_query, to_record
     else
-      instance_variable_set :"@#{self.class.id_name}", self.class.insert(to_record)
+      instance_variable_set(
+        :"@#{self.class.id_name}",
+        self.class.insert(to_record)
+      )
       @persisted = true
     end
   end
@@ -152,6 +166,7 @@ class RubyDB
     self.class.field.keys.reduce({}) do |record, field|
       variable = instance_variable_get :"@#{field}"
       record[field] = variable unless variable.nil?
+      record
     end
   end
 
@@ -162,6 +177,7 @@ class RubyDB
   end
 
   extend TableSettings
+  extend MiddlewareControl
   extend QueryOperations
 
   class Query
@@ -202,7 +218,7 @@ class RubyDB
         ret = io.read_all.map!{|r| externalize r}
         io.close
         ret
-      elsif positions = search_index query
+      elsif positions = search_index(query)
         # not implemented
       else
         q = internalize query
@@ -227,20 +243,28 @@ class RubyDB
     end
 
     def insert(record)
+p 1
       record[@id_name] = current_sequence unless record.has_key? @id_name
+p 2
       r = internalize record
+p 5
       pos = nil
+p 6
       open_content do |io|
         io.seek_last
+p 7
         pos = io.tell
+p 8
         io.write r
       end
+p 9
       add_index pos, record
+p 10
       record[@id_name]
     end
 
     def update(query, record)
-      if positions = search_index query
+      if positions = search_index(query)
         # not implemented
       else
         q = internalize query
@@ -273,7 +297,7 @@ class RubyDB
         open_content do |io|
           io.delete_all
         end
-      elsif positions = search_index query
+      elsif positions = search_index(query)
         # not implemented
       else
         q = internalize query
@@ -348,6 +372,7 @@ class RubyDB
 
     def db_context
       @db_context ||= begin
+        db_field = nil
         RecordIO.open @table_file.header, @table_file.header_format do |io|
           db_field =
           if io.count == 0
@@ -355,7 +380,7 @@ class RubyDB
               io.write [k.to_s]
             end
           else
-            read_all.map! &:to_sym
+            io.read_all.flatten.map! &:to_sym
           end
         end
         db_format = db_field.map{|name| @field[name]}
@@ -368,7 +393,11 @@ class RubyDB
     end
 
     def open_index(name, format, &block)
-      RecordIO.open @table_file.index(name), @table_file.index_format(format), &block
+      RecordIO.open(
+        @table_file.index(name),
+        @table_file.index_format(format),
+        &block
+      )
     end
 
     def current_sequence
@@ -448,8 +477,9 @@ class RubyDB
       EMPTY_BIN = [].pack ''
 
       def initialize(file, format)
+        File.binwrite file, '' unless File.exist? file
         @f = File.open file, 'r+b'
-        accept_fotmat format
+        accept_format format
       end
 
       def self.open(file, format)
@@ -458,7 +488,7 @@ class RubyDB
             io = new file, format
             yield io
           ensure
-            io.close
+            io && io.close
           end
         else
           new file, format
@@ -500,6 +530,10 @@ class RubyDB
         @f.seek 0, IO::SEEK_END
       end
 
+      def tell
+        @f.tell / @record_size
+      end
+
       def delete(i)
         seek i + 1
         data = read_rest
@@ -513,7 +547,10 @@ class RubyDB
       end
 
       def close
-        @f.close
+        @f and begin
+          @f.close
+          @f = nil
+        end
       end
 
       private
