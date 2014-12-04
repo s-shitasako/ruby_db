@@ -243,23 +243,15 @@ class RubyDB
     end
 
     def insert(record)
-p 1
       record[@id_name] = current_sequence unless record.has_key? @id_name
-p 2
       r = internalize record
-p 5
       pos = nil
-p 6
       open_content do |io|
         io.seek_last
-p 7
         pos = io.tell
-p 8
         io.write r
       end
-p 9
       add_index pos, record
-p 10
       record[@id_name]
     end
 
