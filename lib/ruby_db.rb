@@ -347,11 +347,13 @@ class RubyDB
     end
 
     def merge_external(arr_record, map_record)
+      ret = arr_record.clone
       db_field.each_with_index do |name, i|
         if map_record.has_key? name
-          arr_record[i] = map_record[name]
+          ret[i] = map_record[name]
         end
       end
+      ret
     end
 
     def db_field
