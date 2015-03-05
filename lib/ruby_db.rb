@@ -429,11 +429,11 @@ class RubyDB
       end
 
       def header_format
-        %i(string)
+        [:string]
       end
 
       def sequence_format
-        %i(integer)
+        [:integer]
       end
 
       def index_format(element)
